@@ -1,0 +1,7 @@
+[target.aarch64-unknown-linux-gnu]
+linker = "aarch64-linux-gnu-gcc"
+rustflags = ["-C", "link-args=--sysroot=/opt/axis/acapsdk/sysroots/aarch64 -L/opt/axis/acapsdk/sysroots/aarch64/usr/lib"]
+
+[target.thumbv7neon-unknown-linux-gnueabihf]
+linker = "arm-linux-gnueabihf-gcc"
+rustflags = ["-C", "link-args=--sysroot=/opt/axis/acapsdk/sysroots/armv7hf -L/opt/axis/acapsdk/sysroots/armv7hf/usr/lib"]

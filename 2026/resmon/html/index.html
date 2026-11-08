@@ -1,0 +1,251 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Resource monitor</title>
+<style>
+:root { color-scheme: light; --surface: #fcfcfb; --text: #0b0b0b; --muted: #52514e; --grid: #e4e3df; --series: #2a78d6; }
+@media (prefers-color-scheme: dark) {
+  :root { color-scheme: dark; --surface: #1a1a19; --text: #fff; --muted: #c3c2b7; --grid: #3a3a37; --series: #3987e5; }
+}
+body { margin: 0; padding: 16px; background: var(--surface); color: var(--text); font: 14px/1.4 system-ui, sans-serif; }
+h1 { font-size: 18px; margin: 0 0 4px; }
+h2 { font-size: 14px; margin: 0; }
+.sub { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+.axis { display: flex; justify-content: space-between; }
+.now { font-size: 20px; font-variant-numeric: tabular-nums; }
+section { max-width: 720px; margin: 20px 0; }
+nav { display: flex; gap: 4px; border-bottom: 1px solid var(--grid); margin: 8px 0 12px; }
+nav a { padding: 6px 12px; text-decoration: none; color: var(--muted); border-bottom: 2px solid transparent; }
+nav a[aria-selected="true"] { color: var(--text); border-bottom-color: var(--series); }
+label { display: block; margin-top: 16px; }
+input { width: 6em; font: inherit; }
+svg { display: block; width: 100%; height: 96px; touch-action: none; }
+a { color: inherit; }
+</style>
+</head>
+<body>
+<h1>Resource monitor</h1>
+<nav role="tablist">
+  <a role="tab" href="#monitor">Monitor</a>
+  <a role="tab" href="#settings">Settings</a>
+</nav>
+<div id="monitor" role="tabpanel">
+  <div class="sub" id="status">Loading…</div>
+  <div id="panels"></div>
+  <p class="sub"><a href="data/head.jsonl">Newest samples</a></p>
+</div>
+<div id="settings" role="tabpanel" hidden>
+  <label>Sample every <input id="Interval" type="number" min="1" max="3600" required> seconds
+    <span class="sub"></span></label>
+  <label>Keep at most <input id="LogKiB" type="number" min="16" max="16384" required> KiB of samples
+    <span class="sub"></span></label>
+  <p class="sub" id="span"></p>
+</div>
+<script>
+"use strict";
+const MiB = 1 << 20;
+const FILES = 10;
+const fmt = (b) => b == null ? "–" : (b / MiB).toFixed(1) + " MiB";
+const minus = (a, b) => a == null || b == null ? null : a - b;
+const time = (t) => new Date(t * 1000).toLocaleTimeString();
+const DATA = location.origin + location.pathname.replace(/[^/]*$/, "") + "data/";
+const PARAMS = location.origin + "/axis-cgi/param.cgi";
+const fresh = { cache: "no-store", credentials: "same-origin" };
+const cached = { cache: "force-cache", credentials: "same-origin" };
+const monitor = document.getElementById("monitor");
+
+const PANELS = [
+  { title: "Model memory, Ambarella cavalry pool", used: (r) => r.cav_used, total: (r) => r.cav_total,
+    note: (r) => "largest free block " + fmt(r.cav_free_max) },
+  { title: "Contiguous memory (CMA)", used: (r) => minus(r.cma_total, r.cma_free), total: (r) => r.cma_total },
+  { title: "larod service", used: (r) => r.larod_cg ?? r.larod_rss, total: () => null,
+    note: (r) => "cgroup " + fmt(r.larod_cg) + ", resident " + fmt(r.larod_rss) },
+  { title: "RAM", used: (r) => minus(r.mem_total, r.mem_avail), total: (r) => r.mem_total,
+    note: (r) => "available " + fmt(r.mem_avail) },
+  { title: "Application storage", used: (r) => minus(r.pkg_total, r.pkg_avail), total: (r) => r.pkg_total,
+    note: (r) => "available " + fmt(r.pkg_avail) },
+];
+
+function el(tag, attrs, parent) {
+  const e = document.createElementNS("http://www.w3.org/2000/svg", tag);
+  for (const k in attrs) e.setAttribute(k, attrs[k]);
+  return parent.appendChild(e);
+}
+
+function div(parent, cls, text) {
+  const d = parent.appendChild(document.createElement("div"));
+  d.className = cls;
+  d.textContent = text;
+  return d;
+}
+
+function thin(values, max) {
+  if (values.length <= max) return values.map((_, i) => i);
+  const keep = [], size = Math.ceil(values.length / (max / 2));
+  for (let a = 0; a < values.length; a += size) {
+    let lo = -1, hi = -1;
+    for (let i = a; i < Math.min(a + size, values.length); i++) {
+      if (values[i] == null) continue;
+      if (lo < 0 || values[i] < values[lo]) lo = i;
+      if (hi < 0 || values[i] > values[hi]) hi = i;
+    }
+    keep.push(...(lo < 0 ? [a] : [...new Set([Math.min(lo, hi), Math.max(lo, hi)])]));
+  }
+  return keep;
+}
+
+function nearest(rows, t) {
+  let a = 0, b = rows.length - 1;
+  while (a < b) {
+    const m = (a + b) >> 1;
+    if (rows[m].t < t) a = m + 1; else b = m;
+  }
+  return a > 0 && t - rows[a - 1].t < rows[a].t - t ? a - 1 : a;
+}
+
+let hovering = false;
+function draw(host, p, rows) {
+  const used = rows.map(p.used);
+  if (!used.some((v) => v != null)) return;
+  const last = rows[rows.length - 1];
+  let top = 1;
+  rows.forEach((r, i) => { top = Math.max(top, p.total(r) ?? 0, (used[i] ?? 0) * 1.1); });
+  const t0 = rows[0].t, t1 = Math.max(last.t, t0 + 1), W = 1000, H = 100;
+  const x = (t) => (t - t0) / (t1 - t0) * W;
+
+  const s = host.appendChild(document.createElement("section"));
+  s.appendChild(document.createElement("h2")).textContent = p.title;
+  const now = div(s, "now"), readout = div(s, "sub");
+  const show = (r) => {
+    const tot = p.total(r);
+    now.textContent = fmt(p.used(r)) + (tot != null ? " of " + fmt(tot) + " used" : "");
+    readout.textContent = time(r.t) + (p.note ? " · " + p.note(r) : "");
+  };
+  show(last);
+  div(s, "sub axis", fmt(top)).style.justifyContent = "flex-end";
+
+  const svg = el("svg", { viewBox: `0 0 ${W} ${H}`, preserveAspectRatio: "none", role: "img", "aria-label": p.title }, s);
+  const line = { stroke: "var(--grid)", "vector-effect": "non-scaling-stroke" };
+  el("line", { ...line, x1: 0, x2: W, y1: H, y2: H }, svg);
+  el("line", { ...line, x1: 0, x2: W, y1: 0.5, y2: 0.5, "stroke-dasharray": "4 4" }, svg);
+  let d = "", pen = false;
+  for (const i of thin(used, 1000)) {
+    if (used[i] == null) { pen = false; continue; }
+    d += (pen ? "L" : "M") + x(rows[i].t).toFixed(1) + " " + (H - used[i] / top * H).toFixed(1);
+    pen = true;
+  }
+  el("path", { d, fill: "none", stroke: "var(--series)", "stroke-width": 2, "stroke-linejoin": "round", "vector-effect": "non-scaling-stroke" }, svg);
+  const cross = el("line", { y1: 0, y2: H, stroke: "var(--muted)", visibility: "hidden", "vector-effect": "non-scaling-stroke" }, svg);
+  svg.addEventListener("pointermove", (e) => {
+    const b = svg.getBoundingClientRect();
+    const r = rows[nearest(rows, t0 + (e.clientX - b.left) / b.width * (t1 - t0))];
+    cross.setAttribute("x1", x(r.t));
+    cross.setAttribute("x2", x(r.t));
+    cross.setAttribute("visibility", "visible");
+    hovering = true;
+    show(r);
+  });
+  svg.addEventListener("pointerleave", () => { hovering = false; cross.setAttribute("visibility", "hidden"); show(last); });
+
+  const stamp = t1 - t0 > 72000 ? (t) => new Date(t * 1000).toLocaleString() : time;
+  const axis = div(s, "sub axis");
+  for (const t of [t0, last.t]) axis.appendChild(document.createElement("span")).textContent = stamp(t);
+}
+
+const parse = (text) => text.split("\n").filter(Boolean).flatMap((l) => {
+  try { return [JSON.parse(l)]; } catch { return []; }
+});
+let g = null, head = [], have = 0;
+const archived = new Map();
+
+async function update() {
+  if (g !== null) {
+    const r = await fetch(DATA + "head.jsonl", { ...fresh, headers: { Range: `bytes=${have - 1}-` } });
+    const text = r.status === 206 ? await r.text() : "";
+    const end = text.lastIndexOf("\n") + 1;
+    const rows = text[0] === "\n" ? parse(text.slice(1, end)) : null;
+    if (rows && (!rows.length || rows[0].g === g)) {
+      head = head.concat(rows);
+      have += Math.max(end - 1, 0);
+      return;
+    }
+  }
+  const r = await fetch(DATA + "head.jsonl", fresh);
+  const text = r.ok ? await r.text() : "";
+  have = text.lastIndexOf("\n") + 1;
+  head = parse(text.slice(0, have));
+  if (!head.length) return;
+  g = head[0].g;
+  for (const n of archived.keys()) if (n < g - (FILES - 1) || n >= g) archived.delete(n);
+  const missing = [];
+  for (let n = g - (FILES - 1); n < g; n++) if (!archived.has(n)) missing.push(n);
+  await Promise.all(missing.map(async (n) => {
+    const f = await fetch(`${DATA}${n}.jsonl`, cached);
+    archived.set(n, f.ok ? parse(await f.text()) : []);
+  }));
+}
+
+let busy = false;
+async function refresh() {
+  const status = document.getElementById("status");
+  if (busy || hovering || monitor.hidden) return;
+  busy = true;
+  try {
+    await update();
+    const rows = [...archived.keys()].sort((a, b) => a - b).flatMap((n) => archived.get(n)).concat(head);
+    const panels = document.getElementById("panels");
+    panels.replaceChildren();
+    for (const p of PANELS) draw(panels, p, rows);
+    status.textContent = rows.length ? rows.length + " samples, last at " + time(rows[rows.length - 1].t) : "No samples yet.";
+  } catch (e) {
+    status.textContent = "Could not read samples: " + e;
+  } finally {
+    busy = false;
+  }
+}
+
+function showTab() {
+  const tab = location.hash === "#settings" ? "settings" : "monitor";
+  for (const a of document.querySelectorAll("nav a")) a.setAttribute("aria-selected", a.hash === "#" + tab);
+  monitor.hidden = tab !== "monitor";
+  document.getElementById("settings").hidden = tab !== "settings";
+  refresh();
+}
+window.addEventListener("hashchange", showTab);
+
+const values = { Interval: 10, LogKiB: 1024 };
+const duration = (s) => s < 7200 ? Math.round(s / 60) + " minutes" : (s / 3600).toFixed(1) + " hours";
+function showSpan() {
+  const all = values.LogKiB * 1024 / 250 * values.Interval;
+  document.getElementById("span").textContent =
+    `Kept in RAM. At one sample every ${values.Interval} s that is ${duration(all * (FILES - 1) / FILES)} to ${duration(all)}.`;
+}
+
+fetch(PARAMS + "?action=list&group=root.resmon", fresh)
+  .then((r) => r.text())
+  .then((t) => { for (const [, k, v] of t.matchAll(/^root\.resmon\.(\w+)=(\d+)/gim)) if (k in values) values[k] = Number(v); })
+  .catch(() => {})
+  .finally(() => { for (const k in values) document.getElementById(k).value = values[k]; showSpan(); });
+
+for (const k in values) {
+  const input = document.getElementById(k), saved = input.nextElementSibling;
+  input.addEventListener("change", async () => {
+    saved.textContent = "";
+    if (!input.checkValidity()) { saved.textContent = `${input.min} to ${input.max}`; return; }
+    const r = await fetch(`${PARAMS}?action=update&root.resmon.${k}=${input.value}`, fresh).catch(() => null);
+    const ok = r?.ok && (await r.text()).trim() === "OK";
+    saved.textContent = ok ? "saved" : "not saved";
+    if (ok) { values[k] = Number(input.value); showSpan(); }
+  });
+}
+
+showTab();
+(async function loop() {
+  await refresh();
+  setTimeout(loop, Math.min(Math.max(values.Interval, 2), 60) * 1000);
+})();
+</script>
+</body>
+</html>

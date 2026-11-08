@@ -1,0 +1,4 @@
+# The image needs only these; everything else would just invalidate the build cache.
+*
+!/.devhost/
+!/rust-toolchain.toml

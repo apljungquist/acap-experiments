@@ -1,0 +1,27 @@
+{
+    "schemaVersion": "1.7.0",
+    "acapPackageConf": {
+        "setup": {
+            "friendlyName": "Resource monitor",
+            "appName": "resmon",
+            "vendor": "resmon",
+            "runMode": "respawn",
+            "version": "0.8.0"
+        },
+        "configuration": {
+            "settingPage": "index.html",
+            "paramConfig": [
+                {
+                    "name": "Interval",
+                    "type": "int:min=1;max=3600",
+                    "default": "10"
+                },
+                {
+                    "name": "LogKiB",
+                    "type": "int:min=16;max=16384",
+                    "default": "1024"
+                }
+            ]
+        }
+    }
+}

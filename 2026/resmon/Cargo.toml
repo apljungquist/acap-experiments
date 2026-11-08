@@ -1,0 +1,32 @@
+[package]
+# Keep in sync with:
+# - `acapPackageConf.setup.appName` in `manifest.json`
+name = "resmon"
+# Keep in sync with:
+# - `acapPackageConf.setup.version` in `manifest.json`
+version = "0.8.0"
+# resmon is never published to a registry, and saying so is what lets `cargo-about` generate the
+# LICENSE file: the config `cargo-acap-build` embeds ignores private crates, and without this it
+# stops on resmon itself, which declares no license of its own.
+publish = false
+edition = "2021"
+
+[[bin]]
+name = "resmon"
+# Without these, `cargo test` and `cargo bench` build a harness that links std, whose lang items
+# collide with this crate's `#[panic_handler]` (E0152).
+test = false
+bench = false
+
+[dependencies]
+libc = { version = "0.2", default-features = false }
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
